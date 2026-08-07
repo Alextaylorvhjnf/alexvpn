@@ -61,7 +61,7 @@ server {
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location /data/receipts/ { alias /var/www/alexvpn/data/receipts/; try_files \$uri =404; }
     location /data { deny all; }
-    location ~ \.php\$ { include snippets/fastcgi-php.conf; fastcgi_pass $PHP_SOCK; fastcgi_read_timeout 300; }
+    location ~ \.php\$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:$PHP_SOCK; fastcgi_read_timeout 300; }
     gzip on; gzip_types text/plain text/css application/json application/javascript text/xml image/svg+xml;
 }
 NGINX
@@ -90,7 +90,7 @@ server {
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location /data/receipts/ { alias /var/www/alexvpn/data/receipts/; try_files \$uri =404; }
     location /data { deny all; }
-    location ~ \.php\$ { include snippets/fastcgi-php.conf; fastcgi_pass $PHP_SOCK; fastcgi_read_timeout 300; }
+    location ~ \.php\$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:$PHP_SOCK; fastcgi_read_timeout 300; }
     gzip on; gzip_types text/plain text/css application/json application/javascript text/xml image/svg+xml;
 }
 NGINX
