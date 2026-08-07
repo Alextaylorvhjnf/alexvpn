@@ -1,0 +1,414 @@
+<?php
+require_once __DIR__ . '/config.php';
+
+$countries = $GLOBALS['COUNTRIES'];
+
+// Auth
+$isLoggedIn = false;
+if (isset($_POST['password']) && $_POST['password'] === ADMIN_PASSWORD) {
+    $_SESSION['admin_logged_in'] = true;
+    $_SESSION['admin_login_time'] = time();
+}
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header('Location: /admin');
+    exit;
+}
+if (isset($_SESSION['admin_login_time']) && (time() - $_SESSION['admin_login_time'] > 28800)) {
+    session_destroy();
+    header('Location: /admin');
+    exit;
+}
+$isLoggedIn = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'];
+
+if (!isset($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+$message = '';
+$messageType = 'success';
+$settings = loadSettings();
+$servers = loadServers();
+
+if ($isLoggedIn) {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['csrf_token'])) {
+        if ($_POST['csrf_token'] !== $_SESSION['csrf_token']) die('CSRF validation failed');
+    }
+    
+    // Save settings
+    if (isset($_POST['save_settings'])) {
+        $settings['card_number'] = trim($_POST['card_number'] ?? '');
+        $settings['card_holder'] = trim($_POST['card_holder'] ?? '');
+        $settings['card_bank'] = trim($_POST['card_bank'] ?? '');
+        $settings['zarinpal_enabled'] = isset($_POST['zarinpal_enabled']);
+        $settings['card_enabled'] = isset($_POST['card_enabled']);
+        saveSettings($settings);
+        $message = 'تنظیمات پرداخت ذخیره شد.'; $messageType = 'success';
+    }
+    
+    // Save servers
+    if (isset($_POST['save_servers'])) {
+        $newServers = [];
+        foreach ($countries as $code => $c) {
+            $inboundStr = trim($_POST['inbounds_' . $code] ?? '');
+            if (!empty($inboundStr)) {
+                $inbounds = array_values(array_filter(array_map('intval', explode(',', $inboundStr))));
+                if (!empty($inbounds)) $newServers[] = ['location' => $code, 'location_name' => $c['name'], 'inbounds' => $inbounds];
+            }
+        }
+        saveServers($newServers); $servers = $newServers;
+        $message = 'تنظیمات سرورها ذخیره شد.'; $messageType = 'success';
+    }
+    
+    // Add plan
+    if (isset($_POST['add_plan'])) {
+        $plans = loadPlans(); $loc = trim($_POST['location'] ?? '');
+        $newPlan = [
+            'id' => 'plan_' . time() . '_' . bin2hex(random_bytes(4)),
+            'name' => trim($_POST['name'] ?? ''), 'location' => $loc,
+            'location_name' => $countries[$loc]['name'] ?? trim($_POST['location_name'] ?? ''),
+            'location_emoji' => $countries[$loc]['emoji'] ?? '🌍',
+            'volume' => max(1, (int)($_POST['volume'] ?? 0)), 'days' => max(1, (int)($_POST['days'] ?? 0)),
+            'price' => max(1000, (int)($_POST['price'] ?? 0)),
+            'inbounds' => getInboundsForLocation($loc) ?: ALL_INBOUNDS,
+            'active' => true, 'featured' => isset($_POST['featured']), 'created_at' => date('Y-m-d H:i:s')
+        ];
+        if (empty($newPlan['name']) || empty($newPlan['location'])) {
+            $message = 'لطفا فیلدهای ضروری را پر کنید.'; $messageType = 'error';
+        } else { $plans[] = $newPlan; savePlans($plans); $message = 'پلن اضافه شد.'; $messageType = 'success'; }
+    }
+    
+    // Edit plan
+    if (isset($_POST['edit_plan'])) {
+        $plans = loadPlans(); $editId = $_POST['plan_id'] ?? '';
+        foreach ($plans as &$plan) {
+            if ($plan['id'] === $editId) {
+                $loc = trim($_POST['location'] ?? $plan['location']);
+                $plan['name'] = trim($_POST['name'] ?? $plan['name']); $plan['location'] = $loc;
+                $plan['location_name'] = $countries[$loc]['name'] ?? trim($_POST['location_name'] ?? $plan['location_name']);
+                $plan['location_emoji'] = $countries[$loc]['emoji'] ?? ($plan['location_emoji'] ?? '🌍');
+                $plan['volume'] = max(1, (int)($_POST['volume'] ?? $plan['volume']));
+                $plan['days'] = max(1, (int)($_POST['days'] ?? $plan['days']));
+                $plan['price'] = max(1000, (int)($_POST['price'] ?? $plan['price']));
+                $plan['inbounds'] = getInboundsForLocation($loc) ?: ALL_INBOUNDS;
+                $plan['featured'] = isset($_POST['featured']); $plan['updated_at'] = date('Y-m-d H:i:s');
+                $message = 'پلن ویرایش شد.'; $messageType = 'success'; break;
+            }
+        }
+        savePlans($plans);
+    }
+    
+    // Delete / Toggle / Duplicate
+    if (isset($_GET['delete']) && isset($_GET['confirm'])) {
+        $plans = loadPlans(); $plans = array_values(array_filter($plans, fn($p) => $p['id'] !== $_GET['delete']));
+        savePlans($plans); $message = 'پلن حذف شد.'; $messageType = 'success';
+    }
+    if (isset($_GET['toggle'])) {
+        $plans = loadPlans();
+        foreach ($plans as &$p) { if ($p['id'] === $_GET['toggle']) { $p['active'] = !($p['active'] ?? true); break; } }
+        savePlans($plans); $message = 'وضعیت تغییر کرد.'; $messageType = 'info';
+    }
+    if (isset($_GET['duplicate'])) {
+        $plans = loadPlans();
+        foreach ($plans as $p) {
+            if ($p['id'] === $_GET['duplicate']) {
+                $np = $p; $np['id'] = 'plan_' . time() . '_' . bin2hex(random_bytes(4));
+                $np['name'] = $p['name'] . ' (کپی)'; $np['created_at'] = date('Y-m-d H:i:s');
+                unset($np['updated_at']); $plans[] = $np; break;
+            }
+        }
+        savePlans($plans); $message = 'پلن کپی شد.'; $messageType = 'success';
+    }
+}
+
+$plans = loadPlans();
+$orders = loadOrders();
+$pendingPayments = loadPending();
+$pendingList = array_filter($pendingPayments, fn($p) => ($p['status'] ?? '') === 'pending');
+$totalRevenue = array_sum(array_column($orders, 'amount'));
+$activePlans = count(array_filter($plans, fn($p) => $p['active'] ?? true));
+$totalPlans = count($plans);
+$totalOrders = count($orders);
+$pendingCount = count($pendingList);
+?>
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>پنل مدیریت | AlexVPN</title>
+    <meta name="robots" content="noindex, nofollow">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/png" href="/alexvpn.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#060a1a">
+    <script>if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js');}</script>
+    <style>
+        @import url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css');
+        :root {
+            --bg:#060a1a;--bg2:#0c1030;--bg3:#111640;--card:rgba(12,16,48,0.8);--card2:rgba(17,22,64,0.9);
+            --border:rgba(255,255,255,0.06);--border2:rgba(255,255,255,0.12);--border3:rgba(255,255,255,0.2);
+            --text:#e8e8f2;--text2:#b8b8d0;--text3:#8080a0;
+            --p1:#7c6ff7;--p2:#5b4fcf;--t1:#00d4cc;--a1:#ff6b9d;--w1:#fdcb6e;
+            --grad1:linear-gradient(135deg,#7c6ff7,#5b4fcf);--grad2:linear-gradient(135deg,#7c6ff7,#00d4cc);
+            --grad3:linear-gradient(135deg,#ff6b9d,#e85d75);--grad4:linear-gradient(135deg,#00b894,#00d4cc);
+            --radius1:12px;--radius2:18px;--radius3:36px;--shadow1:0 4px 20px rgba(0,0,0,0.3);--shadow2:0 8px 32px rgba(0,0,0,0.5);
+            --trans:0.3s cubic-bezier(0.4,0,0.2,1);
+        }
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:'Vazirmatn',Tahoma,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.7;
+            background-image:radial-gradient(ellipse at top,rgba(124,111,247,0.06),transparent 60%),radial-gradient(ellipse at bottom right,rgba(0,212,204,0.04),transparent 60%);}
+        .login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:radial-gradient(circle at center,rgba(124,111,247,0.1),transparent 70%)}
+        .login-card{background:var(--card);border:1px solid var(--border2);border-radius:28px;padding:48px 36px;width:100%;max-width:420px;backdrop-filter:blur(30px);box-shadow:0 20px 60px rgba(0,0,0,0.5),0 0 80px rgba(124,111,247,0.08);text-align:center}
+        .login-card .logo-icon{width:64px;height:64px;margin:0 auto 20px}
+        .login-card .logo-icon svg{width:100%;height:100%;filter:drop-shadow(0 0 20px rgba(124,111,247,0.5))}
+        .login-card h1{font-size:1.6rem;font-weight:900;margin-bottom:6px}
+        .login-card .sub{color:var(--text3);font-size:.88rem;margin-bottom:28px}
+        .login-card input{width:100%;padding:14px 20px;border-radius:16px;border:2px solid var(--border2);background:rgba(255,255,255,0.03);color:#fff;font-size:1rem;font-family:inherit;text-align:center;transition:var(--trans);outline:none}
+        .login-card input:focus{border-color:var(--p1);box-shadow:0 0 25px rgba(124,111,247,0.2)}
+        .login-card .btn{width:100%;margin-top:20px}
+        .admin-wrap{max-width:1300px;margin:0 auto;padding:0 20px}
+        .admin-header{position:sticky;top:0;z-index:100;backdrop-filter:blur(30px) saturate(180%);background:rgba(6,10,26,0.8);border-bottom:1px solid var(--border);padding:12px 0;margin-bottom:20px}
+        .admin-header .inner{max-width:1300px;margin:0 auto;padding:0 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+        .admin-header .brand{display:flex;align-items:center;gap:8px;text-decoration:none;color:var(--text);font-weight:900;font-size:1.1rem}
+        .admin-header .brand svg{width:34px;height:34px}
+        .admin-header .brand span{background:var(--grad2);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .admin-header .actions{display:flex;gap:8px;flex-wrap:wrap}
+        .btn{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border-radius:var(--radius3);font-weight:700;font-size:.85rem;text-decoration:none;border:none;cursor:pointer;transition:var(--trans);font-family:inherit;white-space:nowrap}
+        .btn-primary{background:var(--grad1);color:#fff;box-shadow:0 0 25px rgba(124,111,247,0.3)}
+        .btn-primary:hover{transform:translateY(-2px);box-shadow:0 0 40px rgba(124,111,247,0.5)}
+        .btn-success{background:var(--grad4);color:#fff}
+        .btn-danger{background:var(--grad3);color:#fff}
+        .btn-outline{background:transparent;border:1px solid var(--border2);color:var(--text2)}
+        .btn-outline:hover{border-color:var(--border3);background:rgba(255,255,255,0.04)}
+        .btn-xs{padding:5px 10px;font-size:.7rem;border-radius:18px}
+        .btn-sm{padding:7px 14px;font-size:.78rem}
+        .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:24px}
+        .stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius2);padding:20px 18px;backdrop-filter:blur(20px);transition:var(--trans);position:relative;overflow:hidden}
+        .stat-card::before{content:'';position:absolute;top:-15px;right:-15px;width:60px;height:60px;border-radius:50%;opacity:0.06;transition:var(--trans)}
+        .stat-card:hover{transform:translateY(-3px);border-color:var(--border3)}
+        .stat-card:hover::before{opacity:0.12;transform:scale(1.4)}
+        .stat-card.s1::before{background:#7c6ff7}.stat-card.s2::before{background:#00d4cc}.stat-card.s3::before{background:#ff6b9d}.stat-card.s4::before{background:#fdcb6e}.stat-card.s5::before{background:#e17055}
+        .stat-card .stat-icon{font-size:1.4rem;margin-bottom:6px}
+        .stat-card .stat-value{font-size:1.5rem;font-weight:900}
+        .stat-card .stat-label{color:var(--text3);font-size:.75rem}
+        .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius2);padding:22px;backdrop-filter:blur(20px);margin-bottom:18px}
+        .card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px}
+        .card-header h3{font-size:1.15rem;font-weight:900;display:flex;align-items:center;gap:8px}
+        .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px}
+        .tab-btn{padding:9px 16px;border-radius:22px;background:transparent;color:var(--text2);border:1px solid var(--border);cursor:pointer;font-family:inherit;font-size:.8rem;font-weight:600;transition:var(--trans)}
+        .tab-btn:hover{border-color:var(--border3);color:#fff}
+        .tab-btn.active{background:rgba(124,111,247,0.12);border-color:var(--p1);color:#fff}
+        .tab-content{display:none;animation:fadeIn .3s ease}
+        .tab-content.active{display:block}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+        .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+        .form-group{margin-bottom:14px}
+        .form-group label{display:block;margin-bottom:5px;color:var(--text2);font-size:.82rem;font-weight:600}
+        .form-group input,.form-group select{width:100%;padding:11px 14px;border-radius:12px;border:2px solid var(--border2);background:rgba(255,255,255,0.03);color:#fff;font-family:inherit;font-size:.88rem;transition:var(--trans);outline:none}
+        .form-group input:focus,.form-group select:focus{border-color:var(--p1);box-shadow:0 0 18px rgba(124,111,247,0.12)}
+        .checkbox-group{display:flex;align-items:center;gap:8px}
+        .checkbox-group input[type="checkbox"]{width:18px;height:18px;accent-color:var(--p1);cursor:pointer}
+        .table-wrap{overflow-x:auto}
+        table{width:100%;border-collapse:collapse;font-size:.82rem}
+        th{color:var(--t1);font-weight:700;padding:10px 12px;text-align:right;border-bottom:2px solid var(--border);white-space:nowrap}
+        td{padding:10px 12px;border-bottom:1px solid var(--border)}
+        tr:hover td{background:rgba(255,255,255,0.015)}
+        .badge{display:inline-block;padding:3px 10px;border-radius:18px;font-size:.7rem;font-weight:700}
+        .badge-success{background:rgba(0,212,204,0.1);color:var(--t1)}.badge-danger{background:rgba(255,107,157,0.1);color:var(--a1)}.badge-info{background:rgba(124,111,247,0.1);color:var(--p1)}.badge-warning{background:rgba(253,203,110,0.1);color:var(--w1)}
+        .alert{padding:12px 18px;border-radius:14px;margin-bottom:18px;font-size:.88rem;font-weight:600;display:flex;align-items:center;gap:8px}
+        .alert-success{background:rgba(0,212,204,0.08);border:1px solid rgba(0,212,204,0.25);color:var(--t1)}
+        .alert-error{background:rgba(255,107,157,0.08);border:1px solid rgba(255,107,157,0.25);color:var(--a1)}
+        .alert-info{background:rgba(124,111,247,0.08);border:1px solid rgba(124,111,247,0.25);color:var(--p1)}
+        .modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;z-index:200;background:rgba(0,0,0,0.7);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:20px}
+        .modal{background:var(--bg2);border:1px solid var(--border2);border-radius:22px;padding:28px 22px;max-width:550px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 25px 50px rgba(0,0,0,0.6);position:relative}
+        .modal h3{font-size:1.2rem;font-weight:900;margin-bottom:16px;text-align:center}
+        .modal .close-btn{position:absolute;top:12px;left:16px;background:none;border:none;color:var(--text3);font-size:1.4rem;cursor:pointer}
+        .loc-flag-preview{text-align:center;font-size:3rem;margin:10px 0}
+        .card-info-box{background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:14px;padding:14px;text-align:center;margin:10px 0}
+        .card-info-box .cnum{font-size:1.3rem;font-weight:900;letter-spacing:2px;direction:ltr;color:var(--t1)}
+        .server-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;background:rgba(0,0,0,0.2);padding:8px 12px;border-radius:10px}
+        .server-row .flag{font-size:1.5rem;width:40px}.server-row .name{width:90px;font-size:.85rem}.server-row input{flex:1}
+        @media(max-width:768px){.form-grid{grid-template-columns:1fr}.stats-grid{grid-template-columns:repeat(2,1fr)}}
+        @media(max-width:480px){.stats-grid{grid-template-columns:1fr}.tabs{flex-wrap:nowrap;overflow-x:auto}}
+        ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+        ::selection{background:rgba(124,111,247,0.3);color:#fff}
+    </style>
+</head>
+<body>
+<?php if (!$isLoggedIn): ?>
+<div class="login-wrap"><div class="login-card">
+    <div class="logo-icon"><svg viewBox="0 0 50 50" fill="none"><defs><linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#7c6ff7"/><stop offset="100%" stop-color="#00d4cc"/></linearGradient></defs><path d="M25 3L42 12v18c0 10-7 18-17 20-10-2-17-10-17-20V12L25 3Z" fill="url(#lg)" opacity="0.9"/><path d="M25 10l10 7v12c0 6-5 11-10 12-5-1-10-6-10-12V17l10-7Z" fill="rgba(255,255,255,0.1)"/><path d="M20 22l3 4 7-8" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></div>
+    <h1>پنل مدیریت AlexVPN</h1><p class="sub">رمز عبور را وارد کنید</p>
+    <form method="post"><input type="password" name="password" placeholder="رمز عبور" required autofocus><button type="submit" class="btn btn-primary">ورود</button></form>
+</div></div>
+<?php else: ?>
+<div class="admin-header"><div class="inner">
+    <a href="/admin" class="brand"><svg viewBox="0 0 50 50" fill="none" width="34" height="34"><defs><linearGradient id="lg2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#7c6ff7"/><stop offset="100%" stop-color="#00d4cc"/></linearGradient></defs><path d="M25 3L42 12v18c0 10-7 18-17 20-10-2-17-10-17-20V12L25 3Z" fill="url(#lg2)" opacity="0.9"/><path d="M20 22l3 4 7-8" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>AlexVPN Admin</span></a>
+    <div class="actions"><a href="<?php echo SITE_URL; ?>/" class="btn btn-outline btn-sm" target="_blank">مشاهده سایت</a><a href="?logout=1" class="btn btn-danger btn-sm">خروج</a></div>
+</div></div>
+<div class="admin-wrap">
+    <?php if ($message): ?><div class="alert alert-<?php echo $messageType; ?>"><?php echo $messageType==='success'?'✅':($messageType==='error'?'❌':'ℹ️'); ?> <?php echo $message; ?></div><?php endif; ?>
+    
+    <div class="stats-grid">
+        <div class="stat-card s1"><div class="stat-icon">📦</div><div class="stat-value"><?php echo $totalPlans; ?></div><div class="stat-label">پلن‌ها (<?php echo $activePlans; ?> فعال)</div></div>
+        <div class="stat-card s2"><div class="stat-icon">🛒</div><div class="stat-value"><?php echo $totalOrders; ?></div><div class="stat-label">سفارشات</div></div>
+        <div class="stat-card s3"><div class="stat-icon">💰</div><div class="stat-value"><?php echo number_format($totalRevenue); ?></div><div class="stat-label">درآمد (تومان)</div></div>
+        <div class="stat-card s4"><div class="stat-icon">⏳</div><div class="stat-value" style="color:<?php echo $pendingCount>0?'#fdcb6e':'var(--t1)'; ?>"><?php echo $pendingCount; ?></div><div class="stat-label">در انتظار تایید</div></div>
+        <div class="stat-card s5"><div class="stat-icon">🖥️</div><div class="stat-value" style="color:var(--t1);">آنلاین</div><div class="stat-label">پنل سنایی</div></div>
+    </div>
+
+    <div class="tabs">
+        <button class="tab-btn active" data-tab="plans">📋 پلن‌ها</button>
+        <button class="tab-btn" data-tab="add">➕ افزودن پلن</button>
+        <button class="tab-btn" data-tab="pending">⏳ در انتظار (<?php echo $pendingCount; ?>)</button>
+        <button class="tab-btn" data-tab="servers">🖥️ سرورها</button>
+        <button class="tab-btn" data-tab="settings">⚙️ تنظیمات</button>
+        <button class="tab-btn" data-tab="orders">📊 سفارشات</button>
+    </div>
+
+    <!-- Plans tab -->
+    <div class="tab-content active" id="tab-plans"><div class="card"><div class="card-header"><h3>لیست پلن‌ها</h3></div>
+        <?php if(empty($plans)): ?><p style="text-align:center;color:var(--text3);padding:30px;">پلنی وجود ندارد.</p>
+        <?php else: ?><div class="table-wrap"><table><thead><tr><th>نام</th><th>لوکیشن</th><th>حجم</th><th>مدت</th><th>قیمت</th><th>وضعیت</th><th>عملیات</th></tr></thead><tbody>
+        <?php foreach($plans as $plan): ?><tr>
+            <td><strong><?php echo htmlspecialchars($plan['name']); ?></strong> <?php echo ($plan['featured']??false)?'⭐':''; ?></td>
+            <td><span style="font-size:1.2rem;"><?php echo htmlspecialchars($plan['location_emoji']??'🌍'); ?></span> <?php echo htmlspecialchars($plan['location_name']??$plan['location']); ?></td>
+            <td><?php echo (int)$plan['volume']; ?> GB</td><td><?php echo (int)$plan['days']; ?> روز</td>
+            <td><strong><?php echo number_format((int)$plan['price']); ?></strong> ت</td>
+            <td><span class="badge <?php echo ($plan['active']??true)?'badge-success':'badge-danger'; ?>"><?php echo ($plan['active']??true)?'فعال':'غیرفعال'; ?></span></td>
+            <td><div style="display:flex;gap:5px;flex-wrap:wrap;">
+                <button class="btn btn-outline btn-xs" onclick="editPlan('<?php echo $plan['id']; ?>','<?php echo htmlspecialchars(addslashes($plan['name'])); ?>','<?php echo $plan['location']; ?>','<?php echo (int)$plan['volume']; ?>','<?php echo (int)$plan['days']; ?>','<?php echo (int)$plan['price']; ?>',<?php echo ($plan['featured']??false)?'true':'false'; ?>)">✏️</button>
+                <a href="?toggle=<?php echo $plan['id']; ?>" class="btn btn-outline btn-xs">🔄</a>
+                <a href="?duplicate=<?php echo $plan['id']; ?>" class="btn btn-outline btn-xs">📋</a>
+                <a href="?delete=<?php echo $plan['id']; ?>&confirm=yes" class="btn btn-danger btn-xs" onclick="return confirm('حذف شود؟')">🗑️</a>
+            </div></td>
+        </tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
+    </div></div>
+
+    <!-- Add tab -->
+    <div class="tab-content" id="tab-add"><div class="card"><div class="card-header"><h3>➕ افزودن پلن</h3></div>
+        <form method="post"><input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>"><input type="hidden" name="add_plan" value="1">
+            <div class="form-grid">
+                <div class="form-group"><label>نام پلن *</label><input type="text" name="name" placeholder="پلن اقتصادی" required></div>
+                <div class="form-group"><label>کشور *</label><select name="location" required onchange="updateFlagPreview(this.value)"><option value="">انتخاب...</option><?php foreach($countries as $code=>$c): ?><option value="<?php echo $code; ?>"><?php echo $c['emoji']; ?> <?php echo $c['name']; ?></option><?php endforeach; ?></select></div>
+                <div class="form-group"><label>حجم (GB)</label><input type="number" name="volume" value="30" min="1" required></div>
+                <div class="form-group"><label>مدت (روز)</label><input type="number" name="days" value="30" min="1" required></div>
+                <div class="form-group"><label>قیمت (تومان)</label><input type="number" name="price" value="150000" min="1000" required></div>
+            </div>
+            <div class="loc-flag-preview" id="flagPreview">🌍</div>
+            <div class="form-group"><div class="checkbox-group"><input type="checkbox" name="featured" id="feat"><label for="feat" style="margin:0;">⭐ پلن محبوب</label></div></div>
+            <button type="submit" class="btn btn-success">افزودن</button>
+        </form>
+    </div></div>
+
+    <!-- Pending tab -->
+    <div class="tab-content" id="tab-pending"><div class="card"><div class="card-header"><h3>⏳ پرداخت‌های در انتظار (<?php echo $pendingCount; ?>)</h3></div>
+        <?php if(empty($pendingList)): ?><p style="text-align:center;color:var(--text3);padding:30px;">موردی نیست.</p>
+        <?php else: ?><div class="table-wrap"><table><thead><tr><th>کاربر</th><th>پلن</th><th>مبلغ</th><th>زمان</th><th>رسید</th><th>عملیات</th></tr></thead><tbody>
+        <?php foreach(array_reverse($pendingList) as $pp): ?><tr>
+            <td><?php echo htmlspecialchars($pp['user_name']??''); ?><br><small style="color:var(--text3);"><?php echo htmlspecialchars($pp['user_email']??''); ?></small></td>
+            <td><?php echo htmlspecialchars($pp['plan_name']??''); ?><br><small style="color:var(--text3);"><?php echo htmlspecialchars($pp['location_name']??''); ?></small></td>
+            <td><strong><?php echo number_format((int)($pp['price']??0)); ?></strong> ت</td>
+            <td><?php echo htmlspecialchars($pp['created_at']??''); ?></td>
+            <td><?php if(!empty($pp['receipt'])): ?><a href="/data/receipts/<?php echo basename($pp['receipt']); ?>" target="_blank" class="btn btn-outline btn-xs">📸</a><?php endif; ?></td>
+            <td><div style="display:flex;gap:5px;">
+                <form method="post" action="/admin-approve.php" style="display:inline;"><input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>"><input type="hidden" name="pending_id" value="<?php echo $pp['id']; ?>"><button type="submit" name="action" value="approve" class="btn btn-success btn-xs">✅ تایید</button></form>
+                <button class="btn btn-danger btn-xs" onclick="rejectPayment('<?php echo $pp['id']; ?>')">❌ رد</button>
+            </div></td>
+        </tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
+    </div></div>
+
+    <!-- Servers tab -->
+    <div class="tab-content" id="tab-servers"><div class="card"><div class="card-header"><h3>🖥️ Inbound های هر لوکیشن</h3></div>
+        <form method="post"><input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>"><input type="hidden" name="save_servers" value="1">
+            <p style="color:var(--text3);font-size:.82rem;margin-bottom:14px;">شماره Inbound ها را با کاما جدا کنید (مثال: 2,3,4,5)</p>
+            <?php foreach($countries as $code=>$c): $cur=''; foreach($servers as $s){if(($s['location']??'')===$code){$cur=implode(',',$s['inbounds']??[]);break;}} ?>
+            <div class="server-row"><span class="flag"><?php echo $c['emoji']; ?></span><span class="name"><?php echo $c['name']; ?></span><input type="text" name="inbounds_<?php echo $code; ?>" value="<?php echo $cur; ?>" placeholder="2,3,4,5" dir="ltr"></div>
+            <?php endforeach; ?>
+            <button type="submit" class="btn btn-primary" style="margin-top:14px;">💾 ذخیره</button>
+        </form>
+    </div></div>
+
+    <!-- Settings tab -->
+    <div class="tab-content" id="tab-settings"><div class="card"><div class="card-header"><h3>⚙️ تنظیمات پرداخت</h3></div>
+        <form method="post"><input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>"><input type="hidden" name="save_settings" value="1">
+            <h4 style="margin-bottom:12px;color:var(--p1);">💳 کارت به کارت</h4>
+            <div class="form-grid">
+                <div class="form-group"><label>شماره کارت</label><input type="text" name="card_number" value="<?php echo htmlspecialchars($settings['card_number']??''); ?>" dir="ltr"></div>
+                <div class="form-group"><label>نام صاحب کارت</label><input type="text" name="card_holder" value="<?php echo htmlspecialchars($settings['card_holder']??''); ?>"></div>
+                <div class="form-group"><label>نام بانک</label><input type="text" name="card_bank" value="<?php echo htmlspecialchars($settings['card_bank']??''); ?>"></div>
+            </div>
+            <div class="card-info-box"><p style="color:var(--text3);font-size:.75rem;">پیش‌نمایش:</p><p class="cnum"><?php echo htmlspecialchars($settings['card_number']?:'----'); ?></p><p style="color:var(--text2);"><?php echo htmlspecialchars($settings['card_holder']?:'---'); ?></p><p style="color:var(--text3);"><?php echo htmlspecialchars($settings['card_bank']?:'---'); ?></p></div>
+            <h4 style="margin:16px 0 12px;color:var(--p1);">🔌 روش‌های پرداخت</h4>
+            <div class="form-group"><div class="checkbox-group"><input type="checkbox" name="zarinpal_enabled" id="ze" <?php echo ($settings['zarinpal_enabled']??true)?'checked':''; ?>><label for="ze">درگاه زرین‌پال</label></div></div>
+            <div class="form-group"><div class="checkbox-group"><input type="checkbox" name="card_enabled" id="ce" <?php echo ($settings['card_enabled']??true)?'checked':''; ?>><label for="ce">کارت به کارت</label></div></div>
+            <button type="submit" class="btn btn-primary">💾 ذخیره</button>
+        </form>
+    </div></div>
+
+    <!-- Orders tab -->
+    <div class="tab-content" id="tab-orders"><div class="card"><div class="card-header"><h3>📊 سفارشات (<?php echo $totalOrders; ?>)</h3></div>
+        <?php if(empty($orders)): ?><p style="text-align:center;color:var(--text3);padding:30px;">سفارشی ثبت نشده.</p>
+        <?php else: ?><div class="table-wrap"><table><thead><tr><th>تاریخ</th><th>کد</th><th>کاربر</th><th>محصول</th><th>مبلغ</th><th>لینک</th></tr></thead><tbody>
+        <?php foreach(array_reverse($orders) as $o): ?><tr>
+            <td><?php echo htmlspecialchars($o['date']??''); ?></td>
+            <td style="font-family:monospace;direction:ltr;"><?php echo htmlspecialchars(substr($o['ref_id']??'',-12)); ?></td>
+            <td style="font-family:monospace;direction:ltr;"><?php echo htmlspecialchars($o['username']??'-'); ?></td>
+            <td><?php echo htmlspecialchars($o['product']??'-'); ?></td>
+            <td><strong><?php echo number_format((int)($o['amount']??0)); ?></strong> ت</td>
+            <td><?php if(!empty($o['subscription_url'])): ?><a href="<?php echo htmlspecialchars($o['subscription_url']); ?>" target="_blank" class="btn btn-outline btn-xs">🔗</a><?php else: ?>-<?php endif; ?></td>
+        </tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
+    </div></div>
+</div>
+
+<!-- Edit Modal -->
+<div class="modal-overlay" id="editModal" style="display:none;"><div class="modal">
+    <button class="close-btn" onclick="closeEdit()">✕</button><h3>✏️ ویرایش پلن</h3>
+    <form method="post" id="editForm"><input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>"><input type="hidden" name="edit_plan" value="1"><input type="hidden" name="plan_id" id="eId">
+        <div class="form-grid">
+            <div class="form-group"><label>نام</label><input type="text" name="name" id="eName" required></div>
+            <div class="form-group"><label>کشور</label><select name="location" id="eLoc" required onchange="updateEditFlag(this.value)"><?php foreach($countries as $code=>$c): ?><option value="<?php echo $code; ?>"><?php echo $c['emoji']; ?> <?php echo $c['name']; ?></option><?php endforeach; ?></select></div>
+            <div class="form-group"><label>حجم</label><input type="number" name="volume" id="eVol" min="1" required></div>
+            <div class="form-group"><label>مدت</label><input type="number" name="days" id="eDays" min="1" required></div>
+            <div class="form-group"><label>قیمت</label><input type="number" name="price" id="ePrice" min="1000" required></div>
+        </div>
+        <div class="loc-flag-preview" id="editFlagPreview">🌍</div>
+        <div class="form-group"><div class="checkbox-group"><input type="checkbox" name="featured" id="eFeat"><label for="eFeat">⭐ محبوب</label></div></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" class="btn btn-outline" onclick="closeEdit()">انصراف</button><button type="submit" class="btn btn-primary">ذخیره</button></div>
+    </form>
+</div></div>
+
+<!-- Reject Modal -->
+<div class="modal-overlay" id="rejectModal" style="display:none;"><div class="modal">
+    <button class="close-btn" onclick="document.getElementById('rejectModal').style.display='none'">✕</button><h3>❌ رد پرداخت</h3>
+    <form method="post" action="/admin-approve.php"><input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>"><input type="hidden" name="action" value="reject"><input type="hidden" name="pending_id" id="rejectPendingId">
+        <div class="form-group"><label>دلیل رد</label><input type="text" name="reject_reason" placeholder="دلیل را وارد کنید" required></div>
+        <button type="submit" class="btn btn-danger" style="width:100%;">ثبت</button>
+    </form>
+</div></div>
+<?php endif; ?>
+
+<script>
+const countryFlags = <?php echo json_encode(array_map(fn($c)=>$c['emoji'], $countries)); ?>;
+function updateFlagPreview(code){document.getElementById('flagPreview').textContent=countryFlags[code]||'🌍';}
+function updateEditFlag(code){document.getElementById('editFlagPreview').textContent=countryFlags[code]||'🌍';}
+function editPlan(id,name,loc,vol,days,price,feat){
+    document.getElementById('eId').value=id;document.getElementById('eName').value=name;document.getElementById('eLoc').value=loc;
+    document.getElementById('eVol').value=vol;document.getElementById('eDays').value=days;document.getElementById('ePrice').value=price;
+    document.getElementById('eFeat').checked=feat;document.getElementById('editFlagPreview').textContent=countryFlags[loc]||'🌍';
+    document.getElementById('editModal').style.display='flex';
+}
+function closeEdit(){document.getElementById('editModal').style.display='none';}
+document.getElementById('editModal').addEventListener('click',function(e){if(e.target===this)closeEdit();});
+function rejectPayment(id){document.getElementById('rejectPendingId').value=id;document.getElementById('rejectModal').style.display='flex';}
+document.getElementById('rejectModal').addEventListener('click',function(e){if(e.target===this)this.style.display='none';});
+document.querySelectorAll('.tab-btn').forEach(b=>{b.addEventListener('click',function(){
+    document.querySelectorAll('.tab-btn').forEach(bb=>bb.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+    this.classList.add('active');document.getElementById('tab-'+this.dataset.tab).classList.add('active');
+});});
+</script>
+</body>
+</html>

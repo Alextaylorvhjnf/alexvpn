@@ -1,0 +1,176 @@
+<?php
+require_once __DIR__ . '/config.php';
+$isUserLoggedIn = isLoggedIn();
+$user = getCurrentUser();
+
+if (isset($_POST['buy_zarinpal']) && isset($_POST['plan_id']) && $isUserLoggedIn) {
+    $plans = loadPlans(); $planId = $_POST['plan_id']; $selectedPlan = null;
+    foreach ($plans as $p) { if ($p['id'] === $planId && ($p['active'] ?? true)) { $selectedPlan = $p; break; } }
+    if ($selectedPlan) {
+        $amount = $selectedPlan['price'] * 10;
+        $paymentData = ['merchant_id'=>MERCHANT_ID,'amount'=>$amount,'callback_url'=>CALLBACK_URL,'description'=>$selectedPlan['name']];
+        $ch = curl_init('https://api.zarinpal.com/pg/v4/payment/request.json');
+        curl_setopt_array($ch,[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>json_encode($paymentData),CURLOPT_RETURNTRANSFER=>true,CURLOPT_HTTPHEADER=>['Content-Type: application/json','Accept: application/json'],CURLOPT_TIMEOUT=>30]);
+        $payResponse = curl_exec($ch); curl_close($ch);
+        $payResult = json_decode($payResponse, true);
+        if (isset($payResult['data']['code']) && $payResult['data']['code']===100) {
+            $_SESSION['alexvpn_payment'] = ['amount'=>$amount,'volume'=>$selectedPlan['volume'],'days'=>$selectedPlan['days'],'inbounds'=>$selectedPlan['inbounds']??ALL_INBOUNDS,'product_name'=>$selectedPlan['name'],'location_name'=>$selectedPlan['location_name']??'','price'=>$selectedPlan['price']];
+            header('Location: https://www.zarinpal.com/pg/StartPay/'.$payResult['data']['authority']); exit;
+        }
+    }
+}
+
+$plans = loadPlans(); $settings = loadSettings(); $servers = loadServers();
+$plansByLocation = [];
+foreach ($plans as $plan) { if ($plan['active']??true) { $loc=$plan['location']??'other'; if(!isset($plansByLocation[$loc])) $plansByLocation[$loc]=[]; $plansByLocation[$loc][]=$plan; } }
+$totalServers = count($servers);
+$totalUsers = count(loadUsers());
+?>
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AlexVPN | اینترنت آزاد، سریع و امن</title>
+    <meta name="description" content="AlexVPN - سرویس VPN پرسرعت با سرورهای اختصاصی. خرید فوری با تحویل خودکار کانفیگ.">
+    <meta name="robots" content="index, follow"><link rel="canonical" href="<?php echo SITE_URL; ?>/">
+    <link rel="icon" type="image/png" href="/alexvpn.png">
+    <meta property="og:title" content="AlexVPN | اینترنت آزاد، سریع و امن"><meta property="og:description" content="خرید VPN پرسرعت با تحویل فوری">
+    <meta name="theme-color" content="#060a1a">
+    <style>
+        @import url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css');
+        *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+        :root{--bg:#060a1a;--bg2:#0c1030;--card:rgba(12,16,48,0.7);--border:rgba(255,255,255,0.05);--border2:rgba(255,255,255,0.1);--text:#e8e8f2;--text2:#b8b8d0;--text3:#8080a0;--p1:#7c6ff7;--t1:#00d4cc;--a1:#ff6b9d;--grad1:linear-gradient(135deg,#7c6ff7,#5b4fcf);--grad2:linear-gradient(135deg,#7c6ff7,#00d4cc);--radius:16px;--radius2:24px;--radius3:36px;--trans:0.35s ease}
+        html{scroll-behavior:smooth;font-size:16px;-webkit-font-smoothing:antialiased}
+        body{font-family:'Vazirmatn',Tahoma,sans-serif;background:var(--bg);color:var(--text);line-height:1.75;overflow-x:hidden;direction:rtl}
+        .bg{position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none;overflow:hidden}
+        .bg-orb{position:absolute;border-radius:50%;filter:blur(140px);opacity:0.05;animation:orbFloat 20s infinite}
+        .bg-orb.o1{width:800px;height:800px;background:radial-gradient(circle,#7c6ff7,transparent 70%);top:-300px;right:-250px}
+        .bg-orb.o2{width:600px;height:600px;background:radial-gradient(circle,#00d4cc,transparent 70%);bottom:-250px;left:-200px;animation-delay:-8s;animation-duration:25s}
+        @keyframes orbFloat{0%,100%{transform:translate(0,0) scale(1)}25%{transform:translate(100px,-60px) scale(1.1)}50%{transform:translate(-50px,80px) scale(0.9)}75%{transform:translate(-80px,-40px) scale(1.05)}}
+        .container{max-width:1200px;margin:0 auto;padding:0 24px;position:relative;z-index:1}
+        .header{position:sticky;top:0;z-index:100;padding:12px 0;backdrop-filter:blur(30px);background:rgba(6,10,26,0.75);border-bottom:1px solid var(--border)}
+        .header-inner{max-width:1200px;margin:0 auto;padding:0 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+        .logo{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--text);font-size:1.4rem;font-weight:900}
+        .logo img{width:40px;height:40px}.logo-text{background:var(--grad2);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:var(--radius3);font-weight:700;font-size:.85rem;text-decoration:none;border:none;cursor:pointer;transition:var(--trans);font-family:inherit}
+        .btn-primary{background:var(--grad1);color:#fff;box-shadow:0 0 25px rgba(124,111,247,0.3)}.btn-primary:hover{transform:translateY(-2px);box-shadow:0 0 45px rgba(124,111,247,0.5)}
+        .btn-outline{background:transparent;border:2px solid var(--border2);color:var(--text2)}.btn-outline:hover{border-color:rgba(255,255,255,0.2)}
+        .btn-gold{background:linear-gradient(135deg,#fdcb6e,#f39c12);color:#000;font-weight:800}.btn-sm{padding:7px 14px;font-size:.78rem}
+        .hero{padding:80px 0 50px;text-align:center}.hero h1{font-size:clamp(2rem,5vw,3.5rem);font-weight:900;line-height:1.3;margin-bottom:12px}.hero h1 .grad{background:var(--grad2);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .hero p{color:var(--text2);font-size:1.05rem;max-width:550px;margin:0 auto 24px}
+        .section{padding:50px 0}.section-head{text-align:center;margin-bottom:36px}.section-label{font-size:.72rem;font-weight:700;letter-spacing:2px;color:var(--p1)}.section-title{font-size:clamp(1.5rem,3vw,2.1rem);font-weight:900}
+        .loc-tabs{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-bottom:28px}
+        .loc-tab{padding:10px 20px;border-radius:var(--radius3);background:var(--card);border:2px solid var(--border);color:var(--text2);cursor:pointer;transition:var(--trans);font-weight:700;font-size:.85rem;display:flex;align-items:center;gap:8px}
+        .loc-tab:hover{border-color:var(--border2)}.loc-tab.active{background:rgba(124,111,247,0.15);border-color:var(--p1);color:#fff;box-shadow:0 0 20px rgba(124,111,247,0.2)}
+        .plans-grid{display:none;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:18px}.plans-grid.active{display:grid}
+        .plan-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius2);padding:28px 22px;text-align:center;backdrop-filter:blur(20px);transition:var(--trans);position:relative}.plan-card:hover{transform:translateY(-6px);border-color:rgba(255,255,255,0.15);box-shadow:0 20px 40px rgba(0,0,0,0.4)}.plan-card.featured{border-color:rgba(0,212,204,0.2)}.plan-card.featured::after{content:'محبوب';position:absolute;top:14px;left:-30px;background:#ff6b9d;color:#fff;font-size:.65rem;font-weight:700;padding:4px 35px;transform:rotate(-45deg)}
+        .plan-flag{width:50px;height:50px;margin:0 auto 12px;border-radius:14px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.03)}.plan-flag svg{width:40px;height:40px}
+        .plan-volume{font-size:2.2rem;font-weight:900;color:var(--t1)}.plan-price{font-size:1.5rem;font-weight:900;margin:8px 0}.plan-price small{font-size:.8rem;color:var(--text3)}
+        .plan-features{list-style:none;text-align:right;margin:12px 0;font-size:.8rem;color:var(--text2)}.plan-features li{padding:3px 0}.plan-features li::before{content:'●';color:var(--t1);margin-left:6px;font-size:.6rem}
+        .feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+        .feat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius2);padding:24px 18px;text-align:center;backdrop-filter:blur(15px);transition:var(--trans)}.feat-card:hover{transform:translateY(-3px)}
+        .feat-icon{width:48px;height:48px;margin:0 auto 12px;background:rgba(255,255,255,0.03);border-radius:14px;display:flex;align-items:center;justify-content:center}.feat-icon svg{width:24px;height:24px;stroke:var(--p1);fill:none;stroke-width:2}
+        .cta-box{background:var(--card);border:1px solid var(--border);border-radius:var(--radius2);padding:45px 28px;text-align:center;backdrop-filter:blur(20px)}
+        .footer{background:rgba(6,10,26,0.9);border-top:1px solid var(--border);padding:40px 0 20px;margin-top:50px;backdrop-filter:blur(20px)}
+        .footer-grid{max-width:1200px;margin:0 auto;padding:0 24px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:24px;margin-bottom:24px}
+        .footer-col h4{color:#fff;font-weight:800;margin-bottom:12px;font-size:.95rem;display:flex;align-items:center;gap:6px}
+        .footer-col a{display:flex;align-items:center;gap:6px;color:var(--text3);text-decoration:none;font-size:.82rem;padding:5px 0;transition:var(--trans)}.footer-col a:hover{color:var(--t1);padding-right:6px}
+        .footer-bottom{text-align:center;padding-top:20px;border-top:1px solid var(--border);color:var(--text3);font-size:.8rem;max-width:1200px;margin:0 auto;padding:20px 24px 0}
+        .footer-bottom .brand{background:var(--grad2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-weight:800}
+        .modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;z-index:200;background:rgba(0,0,0,0.7);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:20px}
+        .modal{background:var(--bg2);border:1px solid var(--border2);border-radius:22px;padding:28px 22px;max-width:460px;width:100%;text-align:center}.modal .card-num{font-size:1.4rem;font-weight:900;letter-spacing:2px;direction:ltr;color:var(--t1)}
+        .modal input[type="file"]{width:100%;padding:12px;margin:10px 0;background:rgba(255,255,255,0.03);border:2px dashed var(--border2);border-radius:14px;color:var(--text2)}.close-modal{position:absolute;top:10px;left:14px;background:none;border:none;color:var(--text3);font-size:1.3rem;cursor:pointer}
+        @media(max-width:768px){.hero h1{font-size:1.7rem}.plans-grid{grid-template-columns:1fr}.footer-grid{grid-template-columns:1fr 1fr}}
+        @media(max-width:480px){.footer-grid{grid-template-columns:1fr}}
+        ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--border2)}
+        ::selection{background:rgba(124,111,247,0.3);color:#fff}
+    </style>
+</head>
+<body>
+    <div class="bg"><div class="bg-orb o1"></div><div class="bg-orb o2"></div></div>
+    <header class="header"><div class="header-inner">
+        <a href="/" class="logo"><img src="/alexvpn.png" alt="AlexVPN"><span class="logo-text">AlexVPN</span></a>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <?php if($isUserLoggedIn): ?><a href="/panel.php" class="btn btn-outline btn-sm">👤 <?php echo htmlspecialchars($user['name']); ?></a>
+            <?php else: ?><a href="/login.php" class="btn btn-outline btn-sm">ورود</a><a href="/login.php?mode=register" class="btn btn-primary btn-sm">ثبت نام</a><?php endif; ?>
+        </div>
+    </div></header>
+    <main class="container">
+        <section class="hero">
+            <h1>اینترنت <span class="grad">آزاد</span>، سریع و امن</h1>
+            <p>با AlexVPN بدون محدودیت به اینترنت جهانی متصل شوید. خرید آنی، تحویل فوری کانفیگ</p>
+            <?php if($isUserLoggedIn): ?><a href="#plans" class="btn btn-primary" style="font-size:1.1rem;padding:14px 34px;">مشاهده پلن‌ها</a>
+            <?php else: ?><a href="/login.php?mode=register" class="btn btn-gold" style="font-size:1.1rem;padding:14px 34px;">شروع کنید</a><?php endif; ?>
+        </section>
+        <?php if($isUserLoggedIn): ?>
+        <section class="section" id="plans"><div class="section-head"><span class="section-label">موقعیت سرورها</span><h2 class="section-title">انتخاب لوکیشن و پلن</h2></div>
+            <?php if(!empty($plansByLocation)): ?>
+            <div class="loc-tabs"><?php $first=true; foreach($plansByLocation as $loc=>$lp): ?><div class="loc-tab <?php echo $first?'active':''; ?>" data-loc="<?php echo $loc; ?>"><?php echo $lp[0]['location_emoji']??'🌍'; ?> <?php echo htmlspecialchars($lp[0]['location_name']??$loc); ?></div><?php $first=false; endforeach; ?></div>
+            <?php $first=true; foreach($plansByLocation as $loc=>$lp): ?>
+            <div class="plans-grid <?php echo $first?'active':''; ?>" data-loc="<?php echo $loc; ?>">
+                <?php foreach($lp as $plan): ?><div class="plan-card <?php echo ($plan['featured']??false)?'featured':''; ?>">
+                    <div class="plan-flag"><?php echo LOCATION_FLAGS[$loc]??''; ?></div>
+                    <h3><?php echo htmlspecialchars($plan['name']); ?></h3>
+                    <div class="plan-volume"><?php echo (int)$plan['volume']; ?> GB</div><div style="color:var(--text3);font-size:.8rem;"><?php echo (int)$plan['days']; ?> روز</div>
+                    <div class="plan-price"><?php echo number_format((int)$plan['price']); ?> <small>تومان</small></div>
+                    <div style="display:flex;gap:6px;flex-direction:column;">
+                        <?php if($settings['zarinpal_enabled']??true): ?><form method="post"><input type="hidden" name="buy_zarinpal" value="1"><input type="hidden" name="plan_id" value="<?php echo $plan['id']; ?>"><button class="btn btn-primary" style="width:100%;">پرداخت آنلاین</button></form><?php endif; ?>
+                        <?php if($settings['card_enabled']??true): ?><button class="btn btn-outline" style="width:100%;" onclick="openCard('<?php echo $plan['id']; ?>')">کارت به کارت</button><?php endif; ?>
+                    </div>
+                </div><?php endforeach; ?>
+            </div><?php $first=false; endforeach; ?>
+            <?php endif; ?>
+        </section>
+        <?php endif; ?>
+        <section class="section"><div class="section-head"><span class="section-label">ویژگی‌ها</span><h2 class="section-title">چرا AlexVPN؟</h2></div>
+            <div class="feat-grid">
+                <?php $feats=[['t'=>'سرعت بی‌نظیر','d'=>'پهنای باند نامحدود'],['t'=>'امنیت پیشرفته','d'=>'رمزنگاری AES-256'],['t'=>'IP اختصاصی','d'=>'آدرس ثابت'],['t'=>'پشتیبانی ۲۴/۷','d'=>'پاسخگویی سریع'],['t'=>'استریم 4K','d'=>'بدون قطعی'],['t'=>'گیمینگ','d'=>'پینگ پایین'],['t'=>'مناسب ترید','d'=>'اتصال پایدار'],['t'=>'همه دستگاه‌ها','d'=>'اندروید، iOS، ویندوز']]; foreach($feats as $f): ?>
+                <div class="feat-card"><div class="feat-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M8 12l2 2 4-4"/></svg></div><h4><?php echo $f['t']; ?></h4><p style="color:var(--text3);font-size:.8rem;"><?php echo $f['d']; ?></p></div>
+                <?php endforeach; ?>
+            </div>
+        </section>
+        <section class="section"><div class="cta-box"><h3>آماده‌اید؟</h3><p style="color:var(--text2);margin:12px 0;">همین حالا ثبت‌نام کنید و به اینترنت آزاد متصل شوید</p><?php if($isUserLoggedIn): ?><a href="#plans" class="btn btn-primary">مشاهده پلن‌ها</a><?php else: ?><a href="/login.php?mode=register" class="btn btn-gold">ثبت نام</a><?php endif; ?></div></section>
+    </main>
+    <footer class="footer">
+        <div class="footer-grid">
+            <div class="footer-col">
+                <h4>🚀 AlexVPN</h4>
+                <a href="#">خرید آنی و اتصال امن</a>
+                <a href="#">اینترنت آزاد، بدون مرز</a>
+            </div>
+            <div class="footer-col">
+                <h4>📱 ارتباط با ما</h4>
+                <a href="https://t.me/Alexvpn98bot" target="_blank">🤖 ربات خرید: @Alexvpn98bot</a>
+                <a href="https://t.me/Alexvpnsupport" target="_blank">💬 پشتیبانی: @Alexvpnsupport</a>
+                <a href="https://t.me/Alexvpn98" target="_blank">📢 کانال تلگرام: @Alexvpn98</a>
+                <a href="https://t.me/ipfinderalexbot" target="_blank">📍 ربات آی‌پی: @ipfinderalexbot</a>
+            </div>
+            <div class="footer-col">
+                <h4>🤖 ربات‌های هوشمند</h4>
+                <a href="https://t.me/AlexvpnAiAssistantbot" target="_blank">🧠 ربات هوشمند: @AlexvpnAiAssistantbot</a>
+            </div>
+            <div class="footer-col">
+                <h4>📷 شبکه‌های اجتماعی</h4>
+                <a href="https://instagram.com/alexvpn98_" target="_blank">📸 اینستاگرام: @alexvpn98_</a>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <p><span class="brand">AlexVPN</span> — اینترنت آزاد، بدون مرز | تمامی حقوق محفوظ است</p>
+        </div>
+    </footer>
+    <?php if($isUserLoggedIn && ($settings['card_enabled']??true)): ?>
+    <div class="modal-overlay" id="cardModal" style="display:none;"><div class="modal" style="position:relative;">
+        <button class="close-modal" onclick="closeCard()">✕</button><h3>💳 پرداخت کارت به کارت</h3>
+        <div style="background:rgba(0,0,0,0.3);border-radius:14px;padding:14px;margin:10px 0;"><p class="card-num"><?php echo $settings['card_number']??'----'; ?></p><p style="color:var(--text2);"><?php echo $settings['card_holder']??''; ?></p><p style="color:var(--text3);font-size:.75rem;"><?php echo $settings['card_bank']??''; ?></p></div>
+        <form action="/card-payment.php" method="post" enctype="multipart/form-data"><input type="hidden" name="plan_id" id="cardPlanId"><input type="file" name="receipt" accept="image/*" required><button type="submit" class="btn btn-primary" style="width:100%;">ارسال رسید</button></form>
+    </div></div>
+    <?php endif; ?>
+    <script>
+    document.querySelectorAll('.loc-tab').forEach(t=>t.addEventListener('click',function(){document.querySelectorAll('.loc-tab').forEach(x=>x.classList.remove('active'));this.classList.add('active');document.querySelectorAll('.plans-grid').forEach(g=>g.classList.remove('active'));var g=document.querySelector('.plans-grid[data-loc="'+this.dataset.loc+'"]');if(g)g.classList.add('active')}));
+    function openCard(id){document.getElementById('cardPlanId').value=id;document.getElementById('cardModal').style.display='flex'}
+    function closeCard(){document.getElementById('cardModal').style.display='none'}
+    document.getElementById('cardModal')?.addEventListener('click',function(e){if(e.target===this)closeCard()});
+    document.querySelectorAll('a[href^="#"]').forEach(a=>a.addEventListener('click',function(e){var t=document.querySelector(this.getAttribute('href'));if(t){e.preventDefault();t.scrollIntoView({behavior:'smooth',block:'start'})}}));
+    </script>
+</body>
+</html>
