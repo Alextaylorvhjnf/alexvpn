@@ -44,6 +44,7 @@ cat > /etc/nginx/sites-available/alexvpn << NGINX
 server {
     listen 80; server_name $DOMAIN; root /var/www/alexvpn; index index.php;
     client_max_body_size 50M;
+    location /admin { try_files \$uri \$uri/ /admin.php?\$query_string; }
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location /data/receipts/ { alias /var/www/alexvpn/data/receipts/; try_files \$uri =404; }
     location /data { deny all; }
