@@ -27,35 +27,74 @@ ADMIN_EMAIL="${ADMIN_USER}@${DOMAIN}"
 echo -e "\n${BLUE}🚀 Installing AlexVPN for ${CYAN}${DOMAIN}${NC}\n"
 
 # 1. Packages
-echo -e "${BLUE}[1/4] Installing packages...${NC}"
+echo -e "${BLUE}[1/4] Packages...${NC}"
 apt update -qq && apt install -y -qq nginx php8.1-fpm php8.1-cli php8.1-curl php8.1-mbstring php8.1-xml php8.1-sqlite3 php8.1-zip unzip curl git certbot python3-certbot-nginx 2>/dev/null
-echo -e "${GREEN}   ✓ Done${NC}"
+echo -e "${GREEN}   ✓${NC}"
 
 # 2. Files
-echo -e "${BLUE}[2/4] Downloading AlexVPN...${NC}"
+echo -e "${BLUE}[2/4] Downloading...${NC}"
 mkdir -p /var/www/alexvpn/data/receipts
 cd /tmp && rm -rf alexvpn && git clone -q https://github.com/Alextaylorvhjnf/alexvpn.git
 cp -r alexvpn/* /var/www/alexvpn/ && rm -rf alexvpn
-echo -e "${GREEN}   ✓ Done${NC}"
+echo -e "${GREEN}   ✓${NC}"
 
 # 3. Nginx + SSL
 echo -e "${BLUE}[3/4] Nginx & SSL...${NC}"
+PHP_SOCK=$(find /var/run/php -name "*.sock" 2>/dev/null | head -1)
+PHP_SOCK=${PHP_SOCK:-unix:/var/run/php/php8.1-fpm.sock}
+
 cat > /etc/nginx/sites-available/alexvpn << NGINX
 server {
-    listen 80; server_name $DOMAIN; root /var/www/alexvpn; index index.php;
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$server_name\$request_uri;
+}
+server {
+    listen 443 ssl http2;
+    server_name $DOMAIN;
+    root /var/www/alexvpn;
+    index index.php index.html;
     client_max_body_size 50M;
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
     location /admin { try_files \$uri \$uri/ /admin.php?\$query_string; }
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location /data/receipts/ { alias /var/www/alexvpn/data/receipts/; try_files \$uri =404; }
     location /data { deny all; }
-    location ~ \.php\$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:/var/run/php/php8.1-fpm.sock; fastcgi_read_timeout 300; }
+    location ~ \.php\$ { include snippets/fastcgi-php.conf; fastcgi_pass $PHP_SOCK; fastcgi_read_timeout 300; }
     gzip on; gzip_types text/plain text/css application/json application/javascript text/xml image/svg+xml;
 }
 NGINX
 ln -sf /etc/nginx/sites-available/alexvpn /etc/nginx/sites-enabled/ && rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
-echo -e "${GREEN}   ✓ Nginx OK${NC}"
-certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m $EMAIL 2>/dev/null && echo -e "${GREEN}   ✓ SSL OK${NC}" || echo -e "${YELLOW}   ⚠ SSL skipped${NC}"
+echo -e "${GREEN}   ✓ Nginx${NC}"
+
+certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m $EMAIL 2>/dev/null && echo -e "${GREEN}   ✓ SSL${NC}" || echo -e "${YELLOW}   ⚠ SSL skipped (will retry after DNS)${NC}"
+
+# بعد از SSL، کانفیگ رو دوباره با SSL درست کن
+cat > /etc/nginx/sites-available/alexvpn << NGINX
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$server_name\$request_uri;
+}
+server {
+    listen 443 ssl http2;
+    server_name $DOMAIN;
+    root /var/www/alexvpn;
+    index index.php index.html;
+    client_max_body_size 50M;
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    location /admin { try_files \$uri \$uri/ /admin.php?\$query_string; }
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location /data/receipts/ { alias /var/www/alexvpn/data/receipts/; try_files \$uri =404; }
+    location /data { deny all; }
+    location ~ \.php\$ { include snippets/fastcgi-php.conf; fastcgi_pass $PHP_SOCK; fastcgi_read_timeout 300; }
+    gzip on; gzip_types text/plain text/css application/json application/javascript text/xml image/svg+xml;
+}
+NGINX
+nginx -t && systemctl reload nginx
 
 # 4. Configure
 echo -e "${BLUE}[4/4] Configuring...${NC}"
@@ -64,7 +103,7 @@ sed -i "s|define('CALLBACK_URL'.*|define('CALLBACK_URL', 'https://$DOMAIN/thank-
 php -r "\$a=['email'=>'$ADMIN_EMAIL','password'=>password_hash('$ADMIN_PASS',PASSWORD_BCRYPT),'created_at'=>date('Y-m-d H:i:s')]; file_put_contents('/var/www/alexvpn/data/admin.json', json_encode(\$a, JSON_UNESCAPED_UNICODE));"
 chown -R www-data:www-data /var/www/alexvpn && chmod -R 755 /var/www/alexvpn && chmod -R 775 /var/www/alexvpn/data
 systemctl restart php8.1-fpm && systemctl reload nginx
-echo -e "${GREEN}   ✓ Done${NC}"
+echo -e "${GREEN}   ✓${NC}"
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
@@ -77,8 +116,5 @@ echo -e "  ${CYAN}👤 Username:${NC}   ${YELLOW}$ADMIN_USER${NC}"
 echo -e "  ${CYAN}📧 Email:${NC}      ${YELLOW}$ADMIN_EMAIL${NC}"
 echo -e "  ${CYAN}🔑 Password:${NC}   ${YELLOW}$ADMIN_PASS${NC}"
 echo ""
-echo -e "  ${PURPLE}📝 After login go to Admin > Panel to set:${NC}"
-echo -e "      • Panel URL & Token"
-echo -e "      • Zarinpal Merchant ID"
-echo ""
+echo -e "  ${PURPLE}📝 After login: Admin > Panel to set Panel/Token/Merchant${NC}"
 echo -e "  ${RED}⚠️  Save these credentials!${NC}"
