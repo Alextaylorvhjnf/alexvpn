@@ -1,2 +1,5 @@
 data/
 *.log
+*.backup
+*.bak
+*.bak2
